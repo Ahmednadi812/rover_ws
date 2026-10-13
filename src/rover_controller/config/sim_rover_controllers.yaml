@@ -1,0 +1,65 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 100 # Hz
+
+    rover_controller:
+      type: diff_drive_controller/DiffDriveController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    gripper_controller:
+      type: velocity_controllers/JointGroupVelocityController
+
+
+gripper_controller:
+  ros__parameters:
+    type: velocity_controllers/JointGroupVelocityController
+    joints:
+      - gripper_joint
+
+
+rover_controller:
+  ros__parameters:
+    type        : diff_drive_controller/DiffDriveController
+    use_stamped_vel: true
+    left_wheel_names  : ['left_wheel_joint', 'left_encoder_joint']
+    right_wheel_names : ['right_wheel_joint', 'right_encoder_joint']
+
+    publish_rate: 50.0
+    pose_covariance_diagonal : [0.001, 0.001, 1.0e-3, 1.0e-3, 1.0e-3, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 1.0e-3, 1.0e-3, 1.0e-3, 0.01]
+
+    wheel_separation : 0.5767
+    wheel_radius : 0.1
+
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    cmd_vel_timeout: 0.5
+    base_frame_id: base_footprint
+    publish_limited_velocity: true
+    publish_wheel_data: true
+    enable_odom_tf: true
+
+    linear:
+      x:
+        has_velocity_limits    : true
+        max_velocity           : 0.73
+        min_velocity           : -0.73
+        has_acceleration_limits: true
+        max_acceleration       : 0.5
+        min_acceleration       : -0.5
+        has_jerk_limits        : false
+        max_jerk               : 5.0
+    angular:
+      z:
+        has_velocity_limits    : true
+        max_velocity           : 2.54
+        min_velocity           : -2.54
+        has_acceleration_limits: true
+        max_acceleration       : 2.0
+        min_acceleration       : -2.0
+        has_jerk_limits        : false
+        max_jerk               : 1.0

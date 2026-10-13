@@ -1,0 +1,354 @@
+#include "rover_motion/pure_pursuit.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <string>
+
+#include "tf2/exceptions.h"
+#include "tf2/time.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+
+namespace rover_motion
+{
+
+PurePursuit::PurePursuit()
+: Node("pure_pursuit_motion_planner_node")
+{
+  look_ahead_distance_ = std::max(
+    0.05, declare_parameter<double>("look_ahead_distance", 0.8));
+  max_linear_velocity_ = std::max(
+    0.0, declare_parameter<double>("max_linear_velocity", 0.9));
+  max_angular_velocity_ = std::max(
+    0.05, declare_parameter<double>("max_angular_velocity", 1.0));
+  max_lateral_acceleration_ = std::max(
+    0.05, declare_parameter<double>("max_lateral_acceleration", 0.4));
+  max_linear_acceleration_ = std::max(
+    0.05, declare_parameter<double>("max_linear_acceleration", 0.5));
+  max_linear_deceleration_ = std::max(
+    0.05, declare_parameter<double>("max_linear_deceleration", 1.0));
+  turn_preview_distance_ = std::max(
+    0.1, declare_parameter<double>("turn_preview_distance", 2.0));
+  goal_tolerance_ = std::max(
+    0.03, declare_parameter<double>("goal_tolerance", 0.15));
+
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+  // The ZigzagPlanner publishes the path with transient_local durability.
+  // Match that QoS so this node can receive the last path if started later.
+  rclcpp::QoS path_qos(rclcpp::KeepLast(1));
+  path_qos.transient_local();
+  path_sub_ = create_subscription<nav_msgs::msg::Path>(
+    "/zigzag/path",
+    path_qos,
+    std::bind(&PurePursuit::pathCallback, this, std::placeholders::_1));
+
+  // Keep the topic expected by the existing twist_mux configuration.
+  cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/key_vel", 10);
+  carrot_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+    "/pure_pursuit/carrot", 10);
+
+  control_loop_ = create_wall_timer(
+    std::chrono::milliseconds(100),
+    std::bind(&PurePursuit::controlLoop, this));
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Adaptive Pure Pursuit started: max speed=%.2f m/s, lookahead=%.2f m, "
+    "turn preview=%.2f m",
+    max_linear_velocity_, look_ahead_distance_, turn_preview_distance_);
+}
+
+void PurePursuit::pathCallback(const nav_msgs::msg::Path::SharedPtr path)
+{
+  global_plan_ = *path;
+  last_nearest_idx_ = 0;
+  commanded_linear_velocity_ = 0.0;
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Received path with %zu poses. Frame: %s",
+    global_plan_.poses.size(), global_plan_.header.frame_id.c_str());
+
+  if (global_plan_.poses.empty()) {
+    publishStop();
+    RCLCPP_WARN(get_logger(), "Received an empty path.");
+  }
+}
+
+void PurePursuit::publishStop()
+{
+  commanded_linear_velocity_ = 0.0;
+  if (cmd_pub_) {
+    geometry_msgs::msg::Twist stop_cmd;
+    cmd_pub_->publish(stop_cmd);
+  }
+}
+
+bool PurePursuit::transformPlan(const std::string & frame)
+{
+  if (global_plan_.poses.empty()) {
+    return true;
+  }
+
+  if (global_plan_.header.frame_id.empty()) {
+    RCLCPP_ERROR(get_logger(), "Path frame_id is empty.");
+    return false;
+  }
+
+  if (global_plan_.header.frame_id == frame) {
+    return true;
+  }
+
+  geometry_msgs::msg::TransformStamped transform;
+  try {
+    transform = tf_buffer_->lookupTransform(
+      frame, global_plan_.header.frame_id, tf2::TimePointZero);
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Could not transform path from '%s' to '%s': %s",
+      global_plan_.header.frame_id.c_str(), frame.c_str(), ex.what());
+    return false;
+  }
+
+  for (auto & pose : global_plan_.poses) {
+    geometry_msgs::msg::PoseStamped transformed_pose;
+    tf2::doTransform(pose, transformed_pose, transform);
+    pose = transformed_pose;
+  }
+
+  global_plan_.header.frame_id = frame;
+  global_plan_.header.stamp = now();
+  return true;
+}
+
+geometry_msgs::msg::PoseStamped PurePursuit::getCarrotPose(
+  const geometry_msgs::msg::PoseStamped & robot_pose)
+{
+  const auto & poses = global_plan_.poses;
+  if (poses.empty()) {
+    return robot_pose;
+  }
+
+  const std::size_t n = poses.size();
+  const std::size_t start = std::min(last_nearest_idx_, n - 1);
+  // Search a bounded distance forward in path order. With 0.1 m path
+  // spacing, 150 points gives enough room to recover from moderate deviation
+  // without jumping to a neighbouring Zigzag lane.
+  const std::size_t end = std::min(n - 1, start + 150);
+
+  std::size_t nearest = start;
+  double nearest_distance = std::numeric_limits<double>::max();
+  for (std::size_t i = start; i <= end; ++i) {
+    const double dx = poses[i].pose.position.x - robot_pose.pose.position.x;
+    const double dy = poses[i].pose.position.y - robot_pose.pose.position.y;
+    const double d = std::hypot(dx, dy);
+    if (d < nearest_distance) {
+      nearest_distance = d;
+      nearest = i;
+    }
+  }
+  last_nearest_idx_ = nearest;
+
+  // Walk forward by distance along the path, not straight-line distance.
+  double accumulated_distance = 0.0;
+  for (std::size_t i = nearest + 1; i < n; ++i) {
+    const auto & prev = poses[i - 1].pose.position;
+    const auto & curr = poses[i].pose.position;
+    accumulated_distance += std::hypot(
+      curr.x - prev.x, curr.y - prev.y);
+    if (accumulated_distance >= look_ahead_distance_) {
+      last_target_idx_ = i;
+      return poses[i];
+    }
+  }
+
+  last_target_idx_ = n - 1;
+  return poses.back();
+}
+
+double PurePursuit::getCurvature(const geometry_msgs::msg::Pose & carrot_pose)
+{
+  const double x = carrot_pose.position.x;
+  const double y = carrot_pose.position.y;
+  const double distance_squared = x * x + y * y;
+
+  if (distance_squared < 1e-6) {
+    return 0.0;
+  }
+  return 2.0 * y / distance_squared;
+}
+
+double PurePursuit::getPreviewCurvature(
+  std::size_t start_idx, double preview_distance)
+{
+  const auto & poses = global_plan_.poses;
+  const std::size_t n = poses.size();
+  if (n < 3 || start_idx >= n - 2) {
+    return 0.0;
+  }
+
+  // Estimate geometric curvature from each three-point section ahead.
+  // A densely sampled 90-degree Zigzag corner produces a larger value,
+  // allowing the robot to start slowing before it reaches the corner.
+  double max_abs_curvature = 0.0;
+  double distance_ahead = 0.0;
+  const std::size_t first = std::max<std::size_t>(1, start_idx);
+
+  for (std::size_t i = first; i + 1 < n; ++i) {
+    const auto & p0 = poses[i - 1].pose.position;
+    const auto & p1 = poses[i].pose.position;
+    const auto & p2 = poses[i + 1].pose.position;
+
+    const double abx = p1.x - p0.x;
+    const double aby = p1.y - p0.y;
+    const double bcx = p2.x - p1.x;
+    const double bcy = p2.y - p1.y;
+    const double acx = p2.x - p0.x;
+    const double acy = p2.y - p0.y;
+
+    const double ab = std::hypot(abx, aby);
+    const double bc = std::hypot(bcx, bcy);
+    const double ac = std::hypot(acx, acy);
+
+    if (ab > 1e-5 && bc > 1e-5 && ac > 1e-5) {
+      const double cross = std::abs(abx * bcy - aby * bcx);
+      const double curvature = 2.0 * cross / (ab * bc * ac);
+      max_abs_curvature = std::max(max_abs_curvature, curvature);
+    }
+
+    distance_ahead += bc;
+    if (distance_ahead >= preview_distance) {
+      break;
+    }
+  }
+
+  return max_abs_curvature;
+}
+
+void PurePursuit::controlLoop()
+{
+  constexpr double dt = 0.1;  // timer period: 100 ms
+
+  if (global_plan_.poses.empty()) {
+    publishStop();
+    return;
+  }
+
+  geometry_msgs::msg::TransformStamped robot_transform;
+  try {
+    // Use the EKF robot pose requested for this stack.
+    robot_transform = tf_buffer_->lookupTransform(
+      "odom", "base_footprint_ekf", tf2::TimePointZero);
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "Could not get odom -> base_footprint_ekf transform: %s", ex.what());
+    publishStop();
+    return;
+  }
+
+  if (!transformPlan(robot_transform.header.frame_id)) {
+    publishStop();
+    return;
+  }
+
+  geometry_msgs::msg::PoseStamped robot_pose;
+  robot_pose.header = robot_transform.header;
+  robot_pose.pose.position.x = robot_transform.transform.translation.x;
+  robot_pose.pose.position.y = robot_transform.transform.translation.y;
+  robot_pose.pose.position.z = robot_transform.transform.translation.z;
+  robot_pose.pose.orientation = robot_transform.transform.rotation;
+
+  // Stop only when the actual final path point is reached.
+  const auto & goal = global_plan_.poses.back().pose.position;
+  const double goal_distance = std::hypot(
+    goal.x - robot_pose.pose.position.x,
+    goal.y - robot_pose.pose.position.y);
+  if (goal_distance <= goal_tolerance_) {
+    RCLCPP_INFO(get_logger(), "Final path goal reached.");
+    publishStop();
+    global_plan_.poses.clear();
+    last_nearest_idx_ = 0;
+    last_target_idx_ = 0;
+    return;
+  }
+
+  const auto carrot_pose = getCarrotPose(robot_pose);
+  carrot_pub_->publish(carrot_pose);
+
+  // Convert the lookahead point into the robot frame.
+  tf2::Transform robot_tf;
+  tf2::Transform carrot_tf;
+  tf2::fromMsg(robot_pose.pose, robot_tf);
+  tf2::fromMsg(carrot_pose.pose, carrot_tf);
+  const tf2::Transform carrot_robot_tf = robot_tf.inverse() * carrot_tf;
+
+  geometry_msgs::msg::Pose carrot_robot_pose;
+  carrot_robot_pose.position.x = carrot_robot_tf.getOrigin().x();
+  carrot_robot_pose.position.y = carrot_robot_tf.getOrigin().y();
+  carrot_robot_pose.position.z = carrot_robot_tf.getOrigin().z();
+  carrot_robot_pose.orientation = tf2::toMsg(carrot_robot_tf.getRotation());
+
+  const double curvature = getCurvature(carrot_robot_pose);
+  const double abs_curvature = std::abs(curvature);
+  const double preview_curvature = getPreviewCurvature(
+    last_nearest_idx_, turn_preview_distance_);
+  const double speed_curvature = std::max(abs_curvature, preview_curvature);
+
+  // Fast on open/straight sections; reduce speed before a sharp turn.
+  double target_speed = max_linear_velocity_;
+  if (speed_curvature > 1e-3) {
+    target_speed = std::min(
+      target_speed,
+      std::sqrt(max_lateral_acceleration_ / speed_curvature));
+  }
+
+  // Limit the requested angular speed based on the curvature at the carrot.
+  if (abs_curvature > 1e-3) {
+    target_speed = std::min(
+      target_speed,
+      max_angular_velocity_ / abs_curvature);
+  }
+  target_speed = std::clamp(target_speed, 0.0, max_linear_velocity_);
+
+  // Rate-limit speed changes: smooth acceleration, stronger braking.
+  if (target_speed > commanded_linear_velocity_) {
+    commanded_linear_velocity_ = std::min(
+      target_speed,
+      commanded_linear_velocity_ + max_linear_acceleration_ * dt);
+  } else {
+    commanded_linear_velocity_ = std::max(
+      target_speed,
+      commanded_linear_velocity_ - max_linear_deceleration_ * dt);
+  }
+
+  geometry_msgs::msg::Twist cmd;
+  cmd.linear.x = commanded_linear_velocity_;
+  cmd.angular.z = std::clamp(
+    commanded_linear_velocity_ * curvature,
+    -max_angular_velocity_, max_angular_velocity_);
+  cmd_pub_->publish(cmd);
+
+  RCLCPP_INFO_THROTTLE(
+    get_logger(), *get_clock(), 1000,
+    "idx=%zu/%zu carrot=%zu k=%.2f preview_k=%.2f v=%.2f/%.2f omega=%.2f",
+    last_nearest_idx_, global_plan_.poses.size(), last_target_idx_,
+    curvature, preview_curvature, commanded_linear_velocity_, target_speed,
+    cmd.angular.z);
+}
+
+}  // namespace rover_motion
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rover_motion::PurePursuit>();
+  rclcpp::spin(node);
+  rclcpp::shutdown();
+  return 0;
+}

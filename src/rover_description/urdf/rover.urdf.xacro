@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+
+
+<robot name="rover_description" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:arg name="is_ignition" default="true"/>
+  <xacro:arg name="is_sim" default="true"/>
+
+  <xacro:include filename="$(find rover_description)/urdf/rover_gazebo.xacro" />
+  <xacro:include filename="$(find rover_description)/urdf/rover_ros2_control.xacro"/>
+
+
+  <link name="base_footprint"/>
+  <link name="base_link">
+    <inertial>
+      <origin
+        xyz="0.010999132167914 0.00109059797854561 0.0408769517199907" rpy="0 0 0" />
+      <mass value="3.281708456341" />
+      <inertia
+        ixx="0.0143286129334122" ixy="4.16222516439531E-06" ixz="0.000136298940132552"
+        iyy="0.0165524507194698" iyz="-5.07859937756691E-08" izz="0.0287575658256255" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color rgba="0.898039215686275 0.898039215686275 0.898039215686275 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/base_link.STL" />
+      </geometry>
+    </collision> 
+  </link>
+
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0.144" rpy="0 0 0"/>
+  </joint>
+
+
+  <link name="L_encoder_wheel">
+    <inertial>
+      <origin xyz="1.00303757121223E-05 1.0410964643992E-05 -0.0121508919109977" rpy="0 0 0" />
+      <mass
+        value="0.466118884694852" />
+      <inertia ixx="0.00160782215357913" ixy="9.75150785233823E-10" ixz="-6.40150760546205E-09"
+               iyy="0.00160783879119068" iyz="1.35113663146754E-08" izz="0.00280453404341875" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/L_encoder_wheel.STL" />
+      </geometry>
+      <material name="Grey">
+        <color rgba="0.5 0.5 0.5 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/L_encoder_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  
+  <joint name="left_encoder_joint" type="continuous">
+    <origin xyz="0.22014240029406 0.288363802564716 -0.0439999999999989" rpy="-1.5707963267949 0 0" />
+    <parent link="base_link" />
+    <child link="L_encoder_wheel" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+
+  <link name="L_wheel">
+    <inertial>
+      <origin xyz="6.71528694240475E-06 8.66210456249711E-06 -0.0101521493968343" rpy="0 0 0" />
+      <mass value="0.446020459592149" />
+      <inertia
+        ixx="0.00160529937609318" ixy="7.64822993178037E-09" ixz="9.69601293483413E-10"
+        iyy="0.00160532966391344" iyz="3.97184258534432E-09" izz="0.00280150353542103" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/L_wheel.STL" />
+      </geometry>
+      <material name="Grey">
+        <color rgba="0.5 0.5 0.5 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/L_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="-0.219857599705941 0.288363802564716 -0.044" rpy="-1.5707963267949 0 0" />
+    <parent link="base_link" />
+    <child link="L_wheel" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+
+  <link name="R_wheel">
+    <inertial>
+      <origin xyz="7.37869266634328E-06 8.16371984253134E-06 0.0101521395470928" rpy="0 0 0" />
+      <mass value="0.446020639835208" />
+      <inertia ixx="0.00160532096851259" ixy="1.13987445800535E-08" ixz="-3.55188382868914E-09"
+               iyy="0.00160530803231386" iyz="-1.58576589881862E-09" izz="0.00280150277106555" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/R_wheel.STL" />
+      </geometry>
+      <material name="Grey">
+        <color rgba="0.5 0.5 0.5 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/R_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="-0.219857599705941 -0.288363802564716 -0.0440000000000003" rpy="-1.5707963267949 0 0" />
+    <parent link="base_link" />
+    <child link="R_wheel" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" velocity="10" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+  <link name="R_encoder_wheel">
+    <inertial>
+      <origin xyz="8.52470823642371E-06 1.17301337929782E-05 0.0121508817130729" rpy="0 0 0" />
+      <mass value="0.466119064937915" />
+      <inertia ixx="0.00160783278972152"  ixy="2.79377819751886E-09"  ixz="-1.42264603956423E-08" 
+               iyy="0.00160782811586814" iyz="4.01683837525805E-09" izz="0.0028045332790633" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/R_encoder_wheel.STL" />
+      </geometry>
+      <material name="Grey">
+        <color rgba="0.5 0.5 0.5 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/R_encoder_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_encoder_joint" type="continuous">
+    <origin xyz="0.220142400294059 -0.288363802564717 -0.0439999999999993" rpy="-1.5707963267949 0 0" />
+    <parent link="base_link" />
+    <child link="R_encoder_wheel" />
+    <axis xyz="0 0 1" /> 
+    <limit effort="10" velocity="10" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+  <link name="gripper">
+    <inertial>
+      <origin xyz="0.0728333185257246 0.0974111004131389 0.150061260964165" rpy="0 0 0" />
+      <mass value="0.217808086050366" />
+      <inertia ixx="0.000839912849961929" ixy="-6.92995019836215E-05" ixz="3.52996820487204E-09"
+               iyy="0.000769076011394855" iyz="-7.48799328082284E-09" izz="0.000214908211413882" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/gripper.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.501960784313725 0.501960784313725 0.501960784313725 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/gripper.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gripper_joint" type="revolute">
+    <origin xyz="-0.219857599705941 0.155109572788706 0.025" rpy="-1.5707963267949 0 3.14159265358979" />
+    <parent link="base_link" />
+    <child link="gripper" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.96706" upper="0" effort="10" velocity="5" />
+    <dynamics damping="0.1" friction="0.1" />
+  </joint>
+
+
+
+  <link name="imu_link">
+    <inertial>
+      <origin xyz="-0.00552433659106688 0.000168210391520346 0.000514000497342681" rpy="0 0 0" />
+      <mass value="0.000528415362211671" />
+      <inertia ixx="1.46176048428261E-08" ixy="1.40015117949421E-10" ixz="-1.99633872937403E-12"
+               iyy="8.59662482954888E-09" iyz="7.52375112767959E-12"
+               izz="2.30279421279312E-08" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/imu_link.STL" />
+      </geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/imu_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  
+  <joint name="imu_joint" type="fixed">
+    <origin xyz="0 0 0.1" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="imu_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+  <link name="laser_link">
+    <inertial>
+      <origin xyz="-0.011945780406062 -0.000381929217680526 -0.0170649378129477" rpy="0 0 0" />
+      <mass value="0.073084435549317" />
+      <inertia ixx="1.96074931730795E-05" ixy="-3.62091076640009E-07" ixz="4.28230084046735E-07"
+               iyy="2.40983835136327E-05" iyz="1.50180909250652E-08"
+               izz="4.14184164228595E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/laser_link.STL" />
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://rover_description/meshes/laser_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="laser_joint" type="fixed">
+    <origin xyz="-0.0050526 -0.0023221 0.17" rpy="0 0 3.14" />
+    <parent link="base_link" />
+    <child link="laser_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+  <material name="blue">
+    <color rgba="0 0 1 1"/>
+  </material>
+  <material name="black">
+    <color rgba="0 0 0 1"/>
+  </material>
+  <material name="silver">
+    <color rgba="0.79 0.82 0.93 1"/>
+  </material>
+  <material name="dark_grey">
+    <color rgba="0.3 0.3 0.3 1"/>
+  </material>
+
+
+
+
+</robot>
