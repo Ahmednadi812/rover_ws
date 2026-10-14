@@ -42,8 +42,8 @@ class AnnotatedMapNode(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Subscribers for sensor topics
-        self.create_subscription(Bool, 'sensor_1', self.sensor_1_callback, 10)
-        self.create_subscription(Bool, 'sensor_2', self.sensor_2_callback, 10)
+        self.create_subscription(Bool, 'proximity', self.sensor_1_callback, 10)
+        self.create_subscription(Bool, 'metal_detector', self.sensor_2_callback, 10)
 
         # Publisher for RViz visualization
         self.marker_pub = self.create_publisher(Marker, 'visualization_marker', 10)

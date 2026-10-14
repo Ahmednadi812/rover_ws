@@ -26,8 +26,8 @@ public:
     path_topic_ = declare_parameter<std::string>("path_topic", "/zigzag/path");
     cmd_topic_ = declare_parameter<std::string>("cmd_topic", "/key_vel");
 
-    max_linear_velocity_ = declare_parameter<double>("max_linear_velocity", 1.2);
-    max_angular_velocity_ = declare_parameter<double>("max_angular_velocity", 1.7);
+    max_linear_velocity_ = declare_parameter<double>("max_linear_velocity", 0.9);
+    max_angular_velocity_ = declare_parameter<double>("max_angular_velocity", 1.2);
     max_deceleration_ = declare_parameter<double>("max_deceleration", 0.8);
     kp_heading_ = declare_parameter<double>("kp_heading", 2.2);
     kd_heading_ = declare_parameter<double>("kd_heading", 0.06);
@@ -324,8 +324,8 @@ private:
   std::string base_frame_;
   std::string path_topic_;
   std::string cmd_topic_;
-  double max_linear_velocity_{1.2};
-  double max_angular_velocity_{1.7};
+  double max_linear_velocity_{0.9};
+  double max_angular_velocity_{1.2};
   double max_deceleration_{0.8};
   double kp_heading_{2.2};
   double kd_heading_{0.06};

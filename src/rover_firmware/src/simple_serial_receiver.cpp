@@ -13,7 +13,7 @@ class SimpleSerialReceiver : public rclcpp::Node
 public:
   SimpleSerialReceiver() : Node("simple_serial_receiver")
   {
-    declare_parameter<std::string>("port", "/dev/ttyUSB1");
+    declare_parameter<std::string>("port", "/dev/ttyACM0");
 
     port_ = get_parameter("port").as_string();
 
