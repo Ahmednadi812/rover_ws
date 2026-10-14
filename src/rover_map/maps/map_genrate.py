@@ -2,7 +2,7 @@ import numpy as np
 from PIL import Image
 
 # ---------------- settings ----------------
-SIZE_M = 20.0          # map is 20 m x 20 m
+SIZE_M = 19.0          # map is 20 m x 20 m
 RES = 0.05             # meters per pixel
 ORIGIN = (-10.0, -10.0, 0.0)  # real-world position of bottom-left pixel
 WALL_M = 0.5           # border wall thickness in meters
