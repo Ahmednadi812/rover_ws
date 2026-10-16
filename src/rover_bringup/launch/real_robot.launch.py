@@ -48,7 +48,7 @@ def generate_launch_description():
         parameters=[{
             "use_sim_time": True,
             "base_frame": "base_footprint",
-            "margin": 2.0,
+            "margin": 0.5,
             "lane_spacing": 1.0,
             "point_step": 0.1,
             "lanes_along_x": True,
