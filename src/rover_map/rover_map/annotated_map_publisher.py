@@ -47,6 +47,9 @@ class AnnotatedMapNode(Node):
 
         # Publisher for RViz visualization
         self.marker_pub = self.create_publisher(Marker, 'visualization_marker', 10)
+        self.proximity_data = False
+        self.metal_detector_data = False
+
 
     def world_to_pixel(self, wx, wy):
         """Converts ROS world coordinates (meters) to Image pixel coordinates."""
@@ -56,11 +59,14 @@ class AnnotatedMapNode(Node):
         return px, py
 
     def sensor_1_callback(self, msg):
-        if msg.data == 1:
+        self.proximity_data = msg.data
+
+        if self.proximity_data == 1:
             self.process_event(r=1.0, g=0.0, b=0.0, fill_color=(255, 0, 0))  # Red
 
     def sensor_2_callback(self, msg):
-        if msg.data == 1:
+        self.metal_detector_data = msg.data
+        if self.metal_detector_data == 1 and self.proximity_data == 0:
             self.process_event(r=0.0, g=1.0, b=0.0, fill_color=(0, 255, 0))  # Green
 
     def process_event(self, r, g, b, fill_color):

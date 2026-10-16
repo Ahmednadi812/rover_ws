@@ -72,10 +72,10 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='static_map_tf',
         arguments=[
-            '--x', '0',
+            '--x', '19',
             '--y', '0',
             '--z', '0',
-            '--yaw', '0',
+            '--yaw', '3.14159',
             '--pitch', '0',
             '--roll', '0',
             '--frame-id', 'odom',

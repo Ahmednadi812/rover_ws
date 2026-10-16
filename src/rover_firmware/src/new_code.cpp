@@ -1,26 +1,45 @@
 #include "rover_firmware/rover_interface.hpp"
-#include <hardware_interface/types/hardware_interface_type_values.hpp>
+
 #include <pluginlib/class_list_macros.hpp>
+
+#include <algorithm>
+#include <cmath>
 #include <iomanip>
+#include <sstream>
+#include <string>
 
 namespace rover_firmware
 {
 
-// Must match the gripper_joint upper limit in the URDF (in radians), so
-// that the position values reported here for the real robot fall on the
-// same scale as what Gazebo reports in simulation. The real robot has no
-// encoder on the gripper, so we can only report 3 discrete points (closed,
-// midway/moving, open) rather than a true continuous angle.
-constexpr double GRIPPER_OPEN_ANGLE_RAD = 2.967;
-constexpr double GRIPPER_MID_ANGLE_RAD = GRIPPER_OPEN_ANGLE_RAD / 2.0;
+namespace
+{
+// IMPORTANT:
+// These values follow the gripper URDF values you showed earlier:
+// lower = -2.96706, upper = 0.0 rad.
+// If your current URDF is different, change these three constants.
+constexpr double GRIPPER_OPEN_ANGLE_RAD = -2.96706;
+constexpr double GRIPPER_CLOSED_ANGLE_RAD = 0.0;
+constexpr double GRIPPER_MID_ANGLE_RAD =
+  (GRIPPER_OPEN_ANGLE_RAD + GRIPPER_CLOSED_ANGLE_RAD) / 2.0;
+
+void trim_line_end(std::string & token)
+{
+  while (!token.empty() &&
+         (token.back() == '\r' || token.back() == '\n' || token.back() == ' ' || token.back() == '\t'))
+  {
+    token.pop_back();
+  }
+}
+}  // namespace
 
 roverInterface::roverInterface()
 {
 }
 
-
 roverInterface::~roverInterface()
 {
+  stop_ros_interfaces();
+
   if (arduino_.IsOpen())
   {
     try
@@ -29,262 +48,468 @@ roverInterface::~roverInterface()
     }
     catch (...)
     {
-      RCLCPP_FATAL_STREAM(rclcpp::get_logger("roverInterface"),
-                          "Something went wrong while closing connection with port " << port_);
+      // Do not throw from a destructor.
     }
   }
 }
 
-
-CallbackReturn roverInterface::on_init(const hardware_interface::HardwareInfo &hardware_info)
+int roverInterface::find_joint_index(const std::string & joint_name) const
 {
-  CallbackReturn result = hardware_interface::SystemInterface::on_init(hardware_info);
-  if (result != CallbackReturn::SUCCESS)
+  for (std::size_t i = 0; i < info_.joints.size(); ++i)
   {
-    return result;
-  }
-
-  try
-  {
-    port_ = info_.hardware_parameters.at("port");
-  }
-  catch (const std::out_of_range &e)
-  {
-    RCLCPP_FATAL(rclcpp::get_logger("roverInterface"), "No Serial Port provided! Aborting");
-    return CallbackReturn::FAILURE;
-  }
-
-  // resize(), not reserve(): guarantees these vectors always have real
-  // elements matching info_.joints.size() before anyone takes an address
-  // into them via export_state_interfaces()/export_command_interfaces().
-  velocity_commands_.resize(info_.joints.size(), 0.0);
-  position_states_.resize(info_.joints.size(), 0.0);
-  velocity_states_.resize(info_.joints.size(), 0.0);
-
-  // Resolve joint indices BY NAME instead of assuming a fixed order in the
-  // xacro file.
-  right_wheel_idx_ = -1;
-  left_wheel_idx_ = -1;
-  gripper_idx_ = -1;
-
-  for (size_t i = 0; i < info_.joints.size(); i++)
-  {
-    const std::string &name = info_.joints[i].name;
-    if (name == "right_wheel_joint")
+    if (info_.joints[i].name == joint_name)
     {
-      right_wheel_idx_ = static_cast<int>(i);
-    }
-    else if (name == "left_wheel_joint")
-    {
-      left_wheel_idx_ = static_cast<int>(i);
-    }
-    else if (name == "gripper_joint")
-    {
-      gripper_idx_ = static_cast<int>(i);
+      return static_cast<int>(i);
     }
   }
 
-  if (right_wheel_idx_ == -1 || left_wheel_idx_ == -1)
+  return -1;
+}
+
+CallbackReturn roverInterface::on_init(
+  const hardware_interface::HardwareInfo & hardware_info)
+{
+  if (hardware_interface::SystemInterface::on_init(hardware_info) != CallbackReturn::SUCCESS)
   {
-    RCLCPP_FATAL(rclcpp::get_logger("roverInterface"),
-                 "right_wheel_joint / left_wheel_joint not found in <ros2_control> joints! Aborting");
-    return CallbackReturn::FAILURE;
+    return CallbackReturn::ERROR;
   }
 
-  if (gripper_idx_ == -1)
+  // Read serial port from ros2_control XML/YAML hardware parameters.
+  const auto port_it = info_.hardware_parameters.find("port");
+  if (port_it == info_.hardware_parameters.end())
   {
-    RCLCPP_WARN(rclcpp::get_logger("roverInterface"),
-                "gripper_joint not found in <ros2_control> joints - gripper control disabled.");
+    RCLCPP_ERROR(rclcpp::get_logger("rover_firmware"),
+                 "Hardware parameter 'port' was not found.");
+    return CallbackReturn::ERROR;
   }
 
-  last_run_ = rclcpp::Clock().now();
+  port_ = port_it->second;
+
+  const std::size_t joint_count = info_.joints.size();
+  velocity_commands_.assign(joint_count, 0.0);
+  position_states_.assign(joint_count, 0.0);
+  velocity_states_.assign(joint_count, 0.0);
+
+  right_wheel_idx_ = find_joint_index("right_wheel_joint");
+  left_wheel_idx_ = find_joint_index("left_wheel_joint");
+  gripper_idx_ = find_joint_index("gripper_joint");
+
+  // Keep the encoder joints exactly in the ros2_control hardware list.
+  // We do not add a camera joint, so controller_manager will not get a new
+  // camera command interface/mode just because of the camera servo.
+  const int left_encoder_idx = find_joint_index("left_encoder_joint");
+  const int right_encoder_idx = find_joint_index("right_encoder_joint");
+
+  if (right_wheel_idx_ < 0 || left_wheel_idx_ < 0)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("rover_firmware"),
+                 "right_wheel_joint and left_wheel_joint must exist.");
+    return CallbackReturn::ERROR;
+  }
+
+  if (left_encoder_idx < 0 || right_encoder_idx < 0)
+  {
+    RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                "Encoder joints were not found by name. The interface will still run.");
+  }
+
+  if (gripper_idx_ < 0)
+  {
+    RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                "gripper_joint was not found. Gripper commands/status will be ignored.");
+  }
+
+  create_ros_interfaces();
+
+  RCLCPP_INFO(rclcpp::get_logger("rover_firmware"),
+              "Rover hardware initialized on port: %s", port_.c_str());
 
   return CallbackReturn::SUCCESS;
 }
 
-
 std::vector<hardware_interface::StateInterface> roverInterface::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
+  state_interfaces.reserve(info_.joints.size() * 2);
 
-  for (size_t i = 0; i < info_.joints.size(); i++)
+  for (std::size_t i = 0; i < info_.joints.size(); ++i)
   {
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_POSITION, &position_states_[i]));
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &velocity_states_[i]));
+    state_interfaces.emplace_back(
+      info_.joints[i].name,
+      hardware_interface::HW_IF_POSITION,
+      &position_states_[i]);
+
+    state_interfaces.emplace_back(
+      info_.joints[i].name,
+      hardware_interface::HW_IF_VELOCITY,
+      &velocity_states_[i]);
   }
 
   return state_interfaces;
 }
 
-
 std::vector<hardware_interface::CommandInterface> roverInterface::export_command_interfaces()
 {
+  // Kept deliberately like the old code:
+  // one velocity command interface for every joint listed by ros2_control.
+  // This avoids changing the controller interface/mode because of the
+  // encoder joints.
   std::vector<hardware_interface::CommandInterface> command_interfaces;
+  command_interfaces.reserve(info_.joints.size());
 
-  for (size_t i = 0; i < info_.joints.size(); i++)
+  for (std::size_t i = 0; i < info_.joints.size(); ++i)
   {
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-        info_.joints[i].name, hardware_interface::HW_IF_VELOCITY, &velocity_commands_[i]));
+    command_interfaces.emplace_back(
+      info_.joints[i].name,
+      hardware_interface::HW_IF_VELOCITY,
+      &velocity_commands_[i]);
   }
 
   return command_interfaces;
 }
 
-
-CallbackReturn roverInterface::on_activate(const rclcpp_lifecycle::State &)
+CallbackReturn roverInterface::on_activate(
+  const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("roverInterface"), "Starting robot hardware ...");
-
-  // fill(), not assignment from an initializer list: never reallocates,
-  // so pointers already exported stay valid.
   std::fill(velocity_commands_.begin(), velocity_commands_.end(), 0.0);
   std::fill(position_states_.begin(), position_states_.end(), 0.0);
   std::fill(velocity_states_.begin(), velocity_states_.end(), 0.0);
 
+  camera_servo_command_.store(0.0);
+  have_proximity_state_ = false;
+  have_metal_detector_state_ = false;
+
   try
   {
+    if (arduino_.IsOpen())
+    {
+      arduino_.Close();
+    }
+
     arduino_.Open(port_);
     arduino_.SetBaudRate(LibSerial::BaudRate::BAUD_115200);
+
+    RCLCPP_INFO(rclcpp::get_logger("rover_firmware"),
+                "Arduino opened successfully: %s", port_.c_str());
   }
-  catch (...)
+  catch (const std::exception & ex)
   {
-    RCLCPP_FATAL_STREAM(rclcpp::get_logger("roverInterface"),
-                        "Something went wrong while interacting with port " << port_);
-    return CallbackReturn::FAILURE;
+    RCLCPP_ERROR(rclcpp::get_logger("rover_firmware"),
+                 "Failed to open Arduino serial port %s: %s",
+                 port_.c_str(), ex.what());
+    return CallbackReturn::ERROR;
   }
 
-  RCLCPP_INFO(rclcpp::get_logger("roverInterface"),
-              "Hardware started, ready to take commands");
+  // Start the internal ROS executor so the camera-servo subscriber can
+  // receive joystick commands.
+  if (ros_executor_ && !ros_interfaces_running_)
+  {
+    ros_executor_->add_node(ros_node_);
+    ros_interfaces_running_ = true;
+    ros_spin_thread_ = std::thread([this]() {
+      ros_executor_->spin();
+    });
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
-
-CallbackReturn roverInterface::on_deactivate(const rclcpp_lifecycle::State &)
+CallbackReturn roverInterface::on_deactivate(
+  const rclcpp_lifecycle::State & /*previous_state*/)
 {
-  RCLCPP_INFO(rclcpp::get_logger("roverInterface"), "Stopping robot hardware ...");
+  std::fill(velocity_commands_.begin(), velocity_commands_.end(), 0.0);
+  camera_servo_command_.store(0.0);
 
+  // Send one stop frame before closing the serial port.
   if (arduino_.IsOpen())
   {
     try
     {
+      const std::string stop_message =
+        "rp00.00,lp00.00,gp00.00,sp00.00,\n";
+      arduino_.Write(stop_message);
+    }
+    catch (const std::exception & ex)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                  "Could not send stop command: %s", ex.what());
+    }
+
+    try
+    {
       arduino_.Close();
     }
-    catch (...)
+    catch (const std::exception & ex)
     {
-      RCLCPP_FATAL_STREAM(rclcpp::get_logger("roverInterface"),
-                          "Something went wrong while closing connection with port " << port_);
+      RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                  "Could not close Arduino port cleanly: %s", ex.what());
     }
   }
 
-  RCLCPP_INFO(rclcpp::get_logger("roverInterface"), "Hardware stopped");
+  stop_ros_interfaces();
   return CallbackReturn::SUCCESS;
 }
 
-
-hardware_interface::return_type roverInterface::read(const rclcpp::Time &,
-                                                          const rclcpp::Duration &)
+std::string roverInterface::format_velocity_token(char letter, double value) const
 {
-  // Serial protocol from Arduino, comma-separated tokens:
-  //   r<p|n><value>  -> right wheel velocity (existing, unchanged)
-  //   l<p|n><value>  -> left wheel velocity (existing, unchanged)
-  //   g<state>       -> gripper status: 'o' = open (limit switch reached),
-  //                      'c' = closed (limit switch reached), 'm' = moving
-  // Example line: "rp12.34,lp10.00,go,"
-  if(arduino_.IsDataAvailable())
-  {
-    auto dt = (rclcpp::Clock().now() - last_run_).seconds();
-    std::string message;
-    arduino_.ReadLine(message);
-    std::stringstream ss(message);
-    std::string res;
-    while(std::getline(ss, res, ','))
-    {
-      if (res.empty())
-      {
-        continue;
-      }
+  std::ostringstream ss;
+  ss << letter << (value >= 0.0 ? 'p' : 'n')
+     << std::fixed << std::setprecision(2) << std::abs(value);
 
-      if(res.at(0) == 'r' || res.at(0) == 'l')
-      {
-        int multiplier = res.at(1) == 'p' ? 1 : -1;
-        double value = std::stod(res.substr(2, res.size()));
-        int idx = (res.at(0) == 'r') ? right_wheel_idx_ : left_wheel_idx_;
-        velocity_states_.at(idx) = multiplier * value;
-        position_states_.at(idx) += velocity_states_.at(idx) * dt;
-      }
-      else if(res.at(0) == 'g' && gripper_idx_ != -1 && res.size() > 1)
-      {
-        char state = res.at(1);
-        if (state == 'o')
-        {
-          position_states_.at(gripper_idx_) = GRIPPER_OPEN_ANGLE_RAD;
-          velocity_states_.at(gripper_idx_) = 0.0;
-        }
-        else if (state == 'c')
-        {
-          position_states_.at(gripper_idx_) = 0.0;
-          velocity_states_.at(gripper_idx_) = 0.0;
-        }
-        else if (state == 'm')
-        {
-          position_states_.at(gripper_idx_) = GRIPPER_MID_ANGLE_RAD;
-          velocity_states_.at(gripper_idx_) = 1.0;
-        }
-      }
-    }
-    last_run_ = rclcpp::Clock().now();
-  }
-  return hardware_interface::return_type::OK;
-}
-
-
-namespace
-{
-std::string format_velocity_token(char letter, double value)
-{
-  char sign = value >= 0 ? 'p' : 'n';
-  double abs_value = std::abs(value);
-  std::string zero_pad = (abs_value < 10.0) ? "0" : "";
-
-  std::stringstream ss;
-  ss << letter << sign << std::fixed << std::setprecision(2) << zero_pad << abs_value;
   return ss.str();
 }
-}  // namespace
 
-
-hardware_interface::return_type roverInterface::write(const rclcpp::Time &,
-                                                          const rclcpp::Duration &)
+hardware_interface::return_type roverInterface::read(
+  const rclcpp::Time & /*time*/,
+  const rclcpp::Duration & period)
 {
-  std::stringstream message_stream;
-
-  message_stream << format_velocity_token('r', velocity_commands_.at(right_wheel_idx_)) << ","
-                  << format_velocity_token('l', velocity_commands_.at(left_wheel_idx_)) << ",";
-
-  if (gripper_idx_ != -1)
+  if (!arduino_.IsOpen())
   {
-    // gripper_joint command is +1 (open), -1 (close), or 0 (stop/hold).
-    // The Arduino owns the motor-stop / limit-switch / magnet logic; this
-    // just forwards the requested direction.
-    message_stream << format_velocity_token('g', velocity_commands_.at(gripper_idx_)) << ",";
+    return hardware_interface::return_type::ERROR;
   }
+
+  if (!arduino_.IsDataAvailable())
+  {
+    return hardware_interface::return_type::OK;
+  }
+
+  std::string serial_data;
 
   try
   {
-    arduino_.Write(message_stream.str());
+    arduino_.ReadLine(serial_data, '\n');
   }
-  catch (...)
+  catch (const std::exception & ex)
   {
-    RCLCPP_ERROR_STREAM(rclcpp::get_logger("roverInterface"),
-                        "Something went wrong while sending the message "
-                            << message_stream.str() << " to the port " << port_);
+    RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                "Serial read failed: %s", ex.what());
+    return hardware_interface::return_type::ERROR;
+  }
+
+  const double dt = period.seconds();
+
+  std::stringstream ss(serial_data);
+  std::string token;
+
+  while (std::getline(ss, token, ','))
+  {
+    trim_line_end(token);
+
+    if (token.empty())
+    {
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // Right wheel velocity: rp12.34 / rn12.34
+    // Left  wheel velocity: lp12.34 / ln12.34
+    // ------------------------------------------------------------
+    if (token.size() >= 3 &&
+        (token[0] == 'r' || token[0] == 'l') &&
+        (token[1] == 'p' || token[1] == 'n'))
+    {
+      try
+      {
+        double value = std::stod(token.substr(2));
+        if (token[1] == 'n')
+        {
+          value = -value;
+        }
+
+        const int joint_idx = (token[0] == 'r') ? right_wheel_idx_ : left_wheel_idx_;
+
+        if (joint_idx >= 0)
+        {
+          velocity_states_[joint_idx] = value;
+          position_states_[joint_idx] += value * dt;
+        }
+      }
+      catch (const std::exception &)
+      {
+        RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                    "Bad wheel token: %s", token.c_str());
+      }
+
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // Proximity digital status: p1 / p0
+    // ------------------------------------------------------------
+    if (token.size() == 2 && token[0] == 'p' &&
+        (token[1] == '0' || token[1] == '1'))
+    {
+      proximity_state_ = (token[1] == '1');
+      have_proximity_state_ = true;
+
+      if (proximity_pub_)
+      {
+        std_msgs::msg::Bool msg;
+        msg.data = proximity_state_;
+        proximity_pub_->publish(msg);
+      }
+
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // Metal detector digital status: m1 / m0
+    // ------------------------------------------------------------
+    if (token.size() == 2 && token[0] == 'm' &&
+        (token[1] == '0' || token[1] == '1'))
+    {
+      metal_detector_state_ = (token[1] == '1');
+      have_metal_detector_state_ = true;
+
+      if (metal_detector_pub_)
+      {
+        std_msgs::msg::Bool msg;
+        msg.data = metal_detector_state_;
+        metal_detector_pub_->publish(msg);
+      }
+
+      continue;
+    }
+
+    // ------------------------------------------------------------
+    // Gripper status from Arduino:
+    // go = open, gc = closed, gm = moving
+    // ------------------------------------------------------------
+    if (token.size() == 2 && token[0] == 'g' && gripper_idx_ >= 0)
+    {
+      switch (token[1])
+      {
+        case 'o':
+          position_states_[gripper_idx_] = GRIPPER_OPEN_ANGLE_RAD;
+          velocity_states_[gripper_idx_] = 0.0;
+          break;
+
+        case 'c':
+          position_states_[gripper_idx_] = GRIPPER_CLOSED_ANGLE_RAD;
+          velocity_states_[gripper_idx_] = 0.0;
+          break;
+
+        case 'm':
+          position_states_[gripper_idx_] = GRIPPER_MID_ANGLE_RAD;
+          velocity_states_[gripper_idx_] = 0.0;
+          break;
+
+        default:
+          break;
+      }
+
+      continue;
+    }
+  }
+
+  return hardware_interface::return_type::OK;
+}
+
+hardware_interface::return_type roverInterface::write(
+  const rclcpp::Time & /*time*/,
+  const rclcpp::Duration & /*period*/)
+{
+  if (!arduino_.IsOpen())
+  {
+    return hardware_interface::return_type::ERROR;
+  }
+
+  std::ostringstream message;
+
+  // Keep the wheel protocol unchanged.
+  message << format_velocity_token('r', velocity_commands_[right_wheel_idx_]) << ',';
+  message << format_velocity_token('l', velocity_commands_[left_wheel_idx_]) << ',';
+
+  // Gripper still uses the ros2_control velocity command.
+  if (gripper_idx_ >= 0)
+  {
+    message << format_velocity_token('g', velocity_commands_[gripper_idx_]) << ',';
+  }
+
+  // Camera servo is NOT a ros2_control joint.
+  // The command comes from /camera_servo_cmd and is sent directly to Arduino.
+  message << format_velocity_token('s', camera_servo_command_.load()) << ',';
+
+  message << '\n';
+
+  try
+  {
+    arduino_.Write(message.str());
+  }
+  catch (const std::exception & ex)
+  {
+    RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                "Serial write failed: %s", ex.what());
     return hardware_interface::return_type::ERROR;
   }
 
   return hardware_interface::return_type::OK;
 }
+
+void roverInterface::create_ros_interfaces()
+{
+  // Avoid accidentally taking controller_manager command-line arguments.
+  rclcpp::NodeOptions options;
+  options.use_global_arguments(false);
+
+  ros_node_ = std::make_shared<rclcpp::Node>(
+    "rover_hardware_interface", options);
+
+  proximity_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
+    "/proximity", 10);
+
+  metal_detector_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
+    "/metal_detector", 10);
+
+  camera_servo_sub_ = ros_node_->create_subscription<std_msgs::msg::Float64>(
+    "/camera_servo_cmd",
+    rclcpp::QoS(10),
+    [this](const std_msgs::msg::Float64::SharedPtr msg) {
+      // Expected values are +1.0, -1.0, or 0.0.
+      double cmd = msg->data;
+
+      if (cmd > 1.0)
+      {
+        cmd = 1.0;
+      }
+      else if (cmd < -1.0)
+      {
+        cmd = -1.0;
+      }
+
+      camera_servo_command_.store(cmd);
+    });
+
+  ros_executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+}
+
+void roverInterface::stop_ros_interfaces()
+{
+  if (ros_interfaces_running_ && ros_executor_)
+  {
+    ros_executor_->cancel();
+
+    if (ros_spin_thread_.joinable())
+    {
+      ros_spin_thread_.join();
+    }
+
+    // It is safe to remove the node after the executor thread has stopped.
+    try
+    {
+      ros_executor_->remove_node(ros_node_);
+    }
+    catch (...)
+    {
+      // Ignore cleanup errors.
+    }
+
+    ros_interfaces_running_ = false;
+  }
+}
+
 }  // namespace rover_firmware
 
-PLUGINLIB_EXPORT_CLASS(rover_firmware::roverInterface, hardware_interface::SystemInterface)
+PLUGINLIB_EXPORT_CLASS(
+  rover_firmware::roverInterface,
+  hardware_interface::SystemInterface)
