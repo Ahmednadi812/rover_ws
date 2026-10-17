@@ -17,10 +17,28 @@ namespace
 // These values follow the gripper URDF values you showed earlier:
 // lower = -2.96706, upper = 0.0 rad.
 // If your current URDF is different, change these three constants.
-constexpr double GRIPPER_OPEN_ANGLE_RAD = -2.96706;
-constexpr double GRIPPER_CLOSED_ANGLE_RAD = 0.0;
+constexpr double GRIPPER_OPEN_ANGLE_RAD = 0.0;
+constexpr double GRIPPER_CLOSED_ANGLE_RAD = -2.96706;
 constexpr double GRIPPER_MID_ANGLE_RAD =
   (GRIPPER_OPEN_ANGLE_RAD + GRIPPER_CLOSED_ANGLE_RAD) / 2.0;
+constexpr double DEFAULT_EFFECTIVE_COUNTS_PER_REV = 2200.0;
+constexpr double TWO_PI = 6.2831853071795864769;
+constexpr double RIGHT_ENCODER_SIGN = 1.0;
+constexpr double LEFT_ENCODER_SIGN = -1.0;  // Firmware applies LEFT_ENCODER_INVERTED to velocity.
+
+bool parseInt64Token(const std::string & token, const std::string & prefix, int64_t & value)
+{
+  if (token.rfind(prefix, 0) != 0 || token.size() <= prefix.size()) return false;
+  try {
+    std::size_t consumed = 0;
+    const long long parsed = std::stoll(token.substr(prefix.size()), &consumed, 10);
+    if (consumed != token.size() - prefix.size()) return false;
+    value = static_cast<int64_t>(parsed);
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
 
 void trim_line_end(std::string & token)
 {
@@ -97,8 +115,27 @@ CallbackReturn roverInterface::on_init(
   // Keep the encoder joints exactly in the ros2_control hardware list.
   // We do not add a camera joint, so controller_manager will not get a new
   // camera command interface/mode just because of the camera servo.
-  const int left_encoder_idx = find_joint_index("left_encoder_joint");
-  const int right_encoder_idx = find_joint_index("right_encoder_joint");
+  left_encoder_idx_ = find_joint_index("left_encoder_joint");
+  right_encoder_idx_ = find_joint_index("right_encoder_joint");
+  const auto counts_it = info_.hardware_parameters.find("effective_counts_per_revolution");
+  if (counts_it != info_.hardware_parameters.end()) {
+    try {
+      const double configured = std::stod(counts_it->second);
+      if (std::isfinite(configured) && configured > 0.0) {
+        effective_counts_per_revolution_ = configured;
+      } else {
+        RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                    "Invalid effective_counts_per_revolution; using default %.1f",
+                    DEFAULT_EFFECTIVE_COUNTS_PER_REV);
+        effective_counts_per_revolution_ = DEFAULT_EFFECTIVE_COUNTS_PER_REV;
+      }
+    } catch (const std::exception &) {
+      RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
+                  "Could not parse effective_counts_per_revolution; using default %.1f",
+                  DEFAULT_EFFECTIVE_COUNTS_PER_REV);
+      effective_counts_per_revolution_ = DEFAULT_EFFECTIVE_COUNTS_PER_REV;
+    }
+  }
 
   if (right_wheel_idx_ < 0 || left_wheel_idx_ < 0)
   {
@@ -107,7 +144,7 @@ CallbackReturn roverInterface::on_init(
     return CallbackReturn::ERROR;
   }
 
-  if (left_encoder_idx < 0 || right_encoder_idx < 0)
+  if (left_encoder_idx_ < 0 || right_encoder_idx_ < 0)
   {
     RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
                 "Encoder joints were not found by name. The interface will still run.");
@@ -122,7 +159,9 @@ CallbackReturn roverInterface::on_init(
   create_ros_interfaces();
 
   RCLCPP_INFO(rclcpp::get_logger("rover_firmware"),
-              "Rover hardware initialized on port: %s", port_.c_str());
+              "Rover hardware initialized on port: %s (effective encoder counts/rev %.1f). "
+              "Confirm this calibration on the physical wheel/gearbox.",
+              port_.c_str(), effective_counts_per_revolution_);
 
   return CallbackReturn::SUCCESS;
 }
@@ -178,6 +217,15 @@ CallbackReturn roverInterface::on_activate(
   camera_servo_command_.store(0.0);
   have_proximity_state_ = false;
   have_metal_detector_state_ = false;
+  ultrasonic_valid_state_ = false;
+  magnet_state_ = false;
+  siren_state_ = false;
+  have_left_encoder_count_ = false;
+  have_right_encoder_count_ = false;
+  last_left_encoder_count_ = 0;
+  last_right_encoder_count_ = 0;
+  cycle_request_pending_.store(false);
+  gripper_admin_command_pending_.store(0);
 
   try
   {
@@ -372,6 +420,114 @@ hardware_interface::return_type roverInterface::read(
     }
 
     // ------------------------------------------------------------
+    // Cumulative quadrature counts: er:<count> / el:<count>.
+    // Keep wheel-velocity feedback from rp/lp separate from encoder positions.
+    // ------------------------------------------------------------
+    int64_t count = 0;
+    if (token.rfind("er:", 0) == 0 && right_encoder_idx_ >= 0) {
+      if (!parseInt64Token(token, "er:", count)) {
+        RCLCPP_WARN(rclcpp::get_logger("rover_firmware"), "Malformed right encoder token: %s", token.c_str());
+        continue;
+      }
+      const double rad_per_count = TWO_PI / effective_counts_per_revolution_;
+      position_states_[right_encoder_idx_] = static_cast<double>(count) * RIGHT_ENCODER_SIGN * rad_per_count;
+      const auto sample_time = std::chrono::steady_clock::now();
+      const double encoder_dt = have_right_encoder_count_
+        ? std::chrono::duration<double>(sample_time - last_right_encoder_time_).count() : 0.0;
+      if (have_right_encoder_count_ && std::isfinite(encoder_dt) && encoder_dt > 0.0 && encoder_dt <= 1.0) {
+        const int64_t delta = count - last_right_encoder_count_;
+        const double max_plausible = effective_counts_per_revolution_ * 20.0 * encoder_dt + 100.0;
+        velocity_states_[right_encoder_idx_] = (std::abs(static_cast<double>(delta)) <= max_plausible)
+          ? static_cast<double>(delta) * RIGHT_ENCODER_SIGN * rad_per_count / encoder_dt : 0.0;
+      } else {
+        velocity_states_[right_encoder_idx_] = 0.0;
+      }
+      last_right_encoder_count_ = count;
+      last_right_encoder_time_ = sample_time;
+      have_right_encoder_count_ = true;
+      continue;
+    }
+    if (token.rfind("el:", 0) == 0 && left_encoder_idx_ >= 0) {
+      if (!parseInt64Token(token, "el:", count)) {
+        RCLCPP_WARN(rclcpp::get_logger("rover_firmware"), "Malformed left encoder token: %s", token.c_str());
+        continue;
+      }
+      const double rad_per_count = TWO_PI / effective_counts_per_revolution_;
+      position_states_[left_encoder_idx_] = static_cast<double>(count) * LEFT_ENCODER_SIGN * rad_per_count;
+      const auto sample_time = std::chrono::steady_clock::now();
+      const double encoder_dt = have_left_encoder_count_
+        ? std::chrono::duration<double>(sample_time - last_left_encoder_time_).count() : 0.0;
+      if (have_left_encoder_count_ && std::isfinite(encoder_dt) && encoder_dt > 0.0 && encoder_dt <= 1.0) {
+        const int64_t delta = count - last_left_encoder_count_;
+        const double max_plausible = effective_counts_per_revolution_ * 20.0 * encoder_dt + 100.0;
+        velocity_states_[left_encoder_idx_] = (std::abs(static_cast<double>(delta)) <= max_plausible)
+          ? static_cast<double>(delta) * LEFT_ENCODER_SIGN * rad_per_count / encoder_dt : 0.0;
+      } else {
+        velocity_states_[left_encoder_idx_] = 0.0;
+      }
+      last_left_encoder_count_ = count;
+      last_left_encoder_time_ = sample_time;
+      have_left_encoder_count_ = true;
+      continue;
+    }
+
+    // Four individual raw proximity diagnostics, sent once per five telemetry frames.
+    if (token.size() == 4 && token[0] == 'q' && token[1] >= '1' && token[1] <= '4' &&
+        token[2] == ':' && (token[3] == '0' || token[3] == '1')) {
+      const std::size_t sensor_index = static_cast<std::size_t>(token[1] - '1');
+      if (sensor_index < proximity_sensor_pubs_.size() && proximity_sensor_pubs_[sensor_index]) {
+        std_msgs::msg::Bool msg;
+        msg.data = (token[3] == '1');
+        proximity_sensor_pubs_[sensor_index]->publish(msg);
+      }
+      continue;
+    }
+
+    // Ultrasonic range (cm) and explicit validity are additive telemetry.
+    if (token.rfind("us:", 0) == 0) {
+      try {
+        const double distance = std::stod(token.substr(3));
+        if (std::isfinite(distance) && distance >= 0.0 && distance <= 25.0 && ultrasonic_distance_pub_) {
+          std_msgs::msg::Float32 msg;
+          msg.data = static_cast<float>(distance);
+          ultrasonic_distance_pub_->publish(msg);
+        }
+      } catch (const std::exception &) {
+        RCLCPP_WARN(rclcpp::get_logger("rover_firmware"), "Malformed ultrasonic token: %s", token.c_str());
+      }
+      continue;
+    }
+    if (token == "uv:0" || token == "uv:1") {
+      ultrasonic_valid_state_ = (token == "uv:1");
+      if (ultrasonic_valid_pub_) {
+        std_msgs::msg::Bool msg; msg.data = ultrasonic_valid_state_; ultrasonic_valid_pub_->publish(msg);
+      }
+      continue;
+    }
+    if (token.rfind("cs:", 0) == 0 && gripper_cycle_state_pub_) {
+      std_msgs::msg::String msg; msg.data = token.substr(3); gripper_cycle_state_pub_->publish(msg);
+      continue;
+    }
+    if (token.rfind("co:", 0) == 0 && gripper_cycle_outcome_pub_) {
+      std_msgs::msg::String msg; msg.data = token.substr(3); gripper_cycle_outcome_pub_->publish(msg);
+      continue;
+    }
+    if (token.rfind("fr:", 0) == 0 && gripper_fault_reason_pub_) {
+      std_msgs::msg::String msg; msg.data = token.substr(3); gripper_fault_reason_pub_->publish(msg);
+      continue;
+    }
+    if (token == "mg:0" || token == "mg:1") {
+      magnet_state_ = (token == "mg:1");
+      if (magnet_state_pub_) { std_msgs::msg::Bool msg; msg.data = magnet_state_; magnet_state_pub_->publish(msg); }
+      continue;
+    }
+    if (token == "si:0" || token == "si:1") {
+      siren_state_ = (token == "si:1");
+      if (siren_state_pub_) { std_msgs::msg::Bool msg; msg.data = siren_state_; siren_state_pub_->publish(msg); }
+      continue;
+    }
+
+    // ------------------------------------------------------------
     // Gripper status from Arduino:
     // go = open, gc = closed, gm = moving
     // ------------------------------------------------------------
@@ -430,6 +586,12 @@ hardware_interface::return_type roverInterface::write(
   // The command comes from /camera_servo_cmd and is sent directly to Arduino.
   message << format_velocity_token('s', camera_servo_command_.load()) << ',';
 
+  // Consume a cycle request exactly once. If serial transmission fails, requeue it.
+  const bool include_cycle_request = cycle_request_pending_.exchange(false);
+  if (include_cycle_request) message << "cycle:1,";
+  const int admin_command = gripper_admin_command_pending_.exchange(0);
+  if (admin_command == 1) message << "grip:reset,";
+  else if (admin_command == 2) message << "grip:recover_down,";
   message << '\n';
 
   try
@@ -438,6 +600,11 @@ hardware_interface::return_type roverInterface::write(
   }
   catch (const std::exception & ex)
   {
+    if (include_cycle_request) cycle_request_pending_.store(true);
+    if (admin_command != 0) {
+      int expected = 0;
+      gripper_admin_command_pending_.compare_exchange_strong(expected, admin_command);
+    }
     RCLCPP_WARN(rclcpp::get_logger("rover_firmware"),
                 "Serial write failed: %s", ex.what());
     return hardware_interface::return_type::ERROR;
@@ -460,6 +627,41 @@ void roverInterface::create_ros_interfaces()
 
   metal_detector_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
     "/metal_detector", 10);
+  proximity_sensor_pubs_.clear();
+  for (int sensor = 1; sensor <= 4; ++sensor) {
+    proximity_sensor_pubs_.push_back(ros_node_->create_publisher<std_msgs::msg::Bool>(
+      "/proximity/sensor_" + std::to_string(sensor), 10));
+  }
+  ultrasonic_distance_pub_ = ros_node_->create_publisher<std_msgs::msg::Float32>(
+    "/ultrasonic/distance", 10);
+  ultrasonic_valid_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
+    "/ultrasonic/valid", 10);
+  gripper_cycle_state_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
+    "/gripper/cycle_state", 10);
+  gripper_cycle_outcome_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
+    "/gripper/cycle_outcome", 10);
+  gripper_fault_reason_pub_ = ros_node_->create_publisher<std_msgs::msg::String>(
+    "/gripper/fault_reason", 10);
+  magnet_state_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
+    "/magnet_state", 10);
+  siren_state_pub_ = ros_node_->create_publisher<std_msgs::msg::Bool>(
+    "/siren_state", 10);
+
+  cycle_request_sub_ = ros_node_->create_subscription<std_msgs::msg::Bool>(
+    "/gripper/cycle_request", rclcpp::QoS(10),
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      if (msg->data) cycle_request_pending_.store(true);
+    });
+  gripper_reset_sub_ = ros_node_->create_subscription<std_msgs::msg::Bool>(
+    "/gripper/reset_request", rclcpp::QoS(10),
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      if (msg->data) gripper_admin_command_pending_.store(1);
+    });
+  gripper_recovery_sub_ = ros_node_->create_subscription<std_msgs::msg::Bool>(
+    "/gripper/recovery_down_request", rclcpp::QoS(10),
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      if (msg->data) gripper_admin_command_pending_.store(2);
+    });
 
   camera_servo_sub_ = ros_node_->create_subscription<std_msgs::msg::Float64>(
     "/camera_servo_cmd",

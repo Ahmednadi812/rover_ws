@@ -9,7 +9,7 @@ class SimpleSerialTransmitter(Node):
     def __init__(self):
         super().__init__("simple_serial_transmitter")
 
-        self.declare_parameter("port", "/dev/ttyACM1")
+        self.declare_parameter("port", "/dev/ttyACM0")
         self.declare_parameter("baudrate", 115200)
 
         self.port_ = self.get_parameter("port").value
