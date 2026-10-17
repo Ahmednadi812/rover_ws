@@ -61,7 +61,7 @@ class AnnotatedMapNode(Node):
     def sensor_1_callback(self, msg):
         self.proximity_data = msg.data
 
-        if self.proximity_data == 1:
+        if self.proximity_data == 1 and self.metal_detector_data == 1:
             self.process_event(r=1.0, g=0.0, b=0.0, fill_color=(255, 0, 0))  # Red
 
     def sensor_2_callback(self, msg):

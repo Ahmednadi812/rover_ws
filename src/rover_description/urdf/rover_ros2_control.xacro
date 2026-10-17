@@ -24,7 +24,7 @@
         <xacro:unless value="$(arg is_sim)">
             <hardware>
                 <plugin>rover_firmware/roverInterface</plugin>
-                <param name="port">/dev/ttyACM0</param>
+                <param name="port">/dev/ttyACM1</param>
             </hardware>
         </xacro:unless>
         

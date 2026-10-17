@@ -10,7 +10,7 @@ class SimpleSerialTransmitter : public rclcpp::Node
 public:
   SimpleSerialTransmitter() : Node("simple_serial_transmitter")
   {
-    declare_parameter<std::string>("port", "/dev/ttyACM0 ");
+    declare_parameter<std::string>("port", "/dev/ttyACM1 ");
 
     port_ = get_parameter("port").as_string();
 
